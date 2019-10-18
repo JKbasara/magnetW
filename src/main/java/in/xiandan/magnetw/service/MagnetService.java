@@ -11,11 +11,13 @@ import org.htmlcleaner.DomSerializer;
 import org.htmlcleaner.HtmlCleaner;
 import org.htmlcleaner.TagNode;
 import org.jsoup.Connection;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.stereotype.Service;
@@ -39,6 +41,7 @@ import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathFactory;
 
 import in.xiandan.magnetw.config.ApplicationConfig;
+import in.xiandan.magnetw.exception.EmptyListException;
 import in.xiandan.magnetw.exception.MagnetParserException;
 import in.xiandan.magnetw.request.DefaultSslSocketFactory;
 import in.xiandan.magnetw.response.MagnetItem;
@@ -123,11 +126,11 @@ public class MagnetService {
                 .ignoreContentType(true)
                 .sslSocketFactory(DefaultSslSocketFactory.getDefaultSslSocketFactory())
                 .timeout((int) config.sourceTimeout)
-                .header(HttpHeaders.HOST, host);
+                .header(HttpHeaders.HOST, host)
+                .header(HttpHeaders.ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,zh-TW;q=0.8,en;q=0.7,und;q=0.6,ja;q=0.5,la;q=0.4");
         //增加userAgent
-        if (StringUtils.isEmpty(userAgent)) {
-            connect.header(HttpHeaders.USER_AGENT, userAgent);
-        }
+        String userAgentHeader = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.132 Safari/537.36";
+        connect.header(HttpHeaders.USER_AGENT, userAgentHeader);
 
         //代理设置
         if (config.proxyEnabled && isProxy) {
@@ -162,7 +165,7 @@ public class MagnetService {
     }
 
     public String formatSiteUrl(MagnetRule rule, String keyword, String sort, int page) {
-        if (StringUtils.isEmpty(keyword)){
+        if (StringUtils.isEmpty(keyword)) {
             return rule.getUrl();
         }
         //用页码和关键字 拼接源站的url
@@ -172,9 +175,9 @@ public class MagnetService {
     }
 
     @Cacheable(value = "magnetList", key = "T(String).format('%s-%s-%s-%d',#rule.url,#keyword,#sort,#page)")
-    public List<MagnetItem> parser(MagnetRule rule, String keyword, String sort, int page, String userAgent) throws MagnetParserException, IOException {
+    public List<MagnetItem> parser(MagnetRule rule, String keyword, String sort, int page, String userAgent) throws Exception {
         if (StringUtils.isEmpty(keyword)) {
-            return new ArrayList<MagnetItem>();
+            throw new EmptyListException();
         }
 
         String url = formatSiteUrl(rule, keyword, sort, page);
@@ -254,9 +257,19 @@ public class MagnetService {
                     }
                 }
             }
+            if (infos.isEmpty()) {
+                throw new EmptyListException();
+            }
             return infos;
+        } catch (EmptyListException e) {
+            //防止空数据被缓存
+            throw e;
         } catch (Exception e) {
-            throw new MagnetParserException(e);
+            if (e instanceof HttpStatusException && ((HttpStatusException) e).getStatusCode() == HttpStatus.NOT_FOUND.value()) {
+                throw new EmptyListException();
+            } else {
+                throw new MagnetParserException(e);
+            }
         }
     }
 
@@ -281,10 +294,8 @@ public class MagnetService {
                     logger.info(String.format("成功预加载 %s-%s-%d，缓存%d条数据", current.getSite(), current.getKeyword(), page, items.size()));
                 }
             }
-        } catch (MagnetParserException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (Exception e) {
+            logger.error("异步缓存下一页失败", e);
         }
     }
 
@@ -365,7 +376,7 @@ public class MagnetService {
                 e.printStackTrace();
                 newMagnet = url;
             }
-            return String.format("magnet:?xt=urn:btih:%s", newMagnet);
+            return String.format("magnet:?xt=urn:btih:%s", newMagnet).toLowerCase();
         }
     }
 
